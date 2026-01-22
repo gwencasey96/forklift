@@ -957,11 +957,10 @@ func (r *KubeVirt) createPodToBindPVCs(vm *plan.VMStatus, pvcNames []string) (er
 		},
 	}
 
-	// Only set user ID when MTV controller runs on Kubernetes
-	// When MTV controller runs on OpenShift, SCCs will assign appropriate IDs automatically
-	if !Settings.OpenShift {
-		securityContext.RunAsUser = ptr.To(qemuUser)
-	}
+	// Don't set user ID - let the cluster assign it automatically
+	// On OpenShift, SCCs will assign appropriate IDs automatically
+	// On Kubernetes with restricted policies, the cluster will assign IDs in the allowed range
+	// Setting specific IDs (like 107) can fail on clusters with restricted-v2 SCC-like policies
 	pod := &core.Pod{
 		ObjectMeta: meta.ObjectMeta{
 			Namespace:    r.Plan.Spec.TargetNamespace,
@@ -991,11 +990,8 @@ func (r *KubeVirt) createPodToBindPVCs(vm *plan.VMStatus, pvcNames []string) (er
 				},
 			},
 			Volumes: volumes,
-			SecurityContext: &core.PodSecurityContext{
-				SeccompProfile: &core.SeccompProfile{
-					Type: core.SeccompProfileTypeRuntimeDefault,
-				},
-			},
+			// Don't set seccomp profile - it may be forbidden by restricted Pod Security Standards
+			// On OpenShift, SCCs will handle seccomp automatically
 		},
 	}
 	// Align with the conversion pod request, to prevent breakage
@@ -2263,19 +2259,6 @@ func (r *KubeVirt) getVirtV2vPod(vm *plan.VMStatus, vmVolumes []cnv.Volume, vddk
 		*/
 		annotations[planbase.AnnOpenDefaultPorts] = string(yamlPorts)
 	}
-	var seccompProfile core.SeccompProfile
-	if settings.Settings.OpenShift {
-		unshare := "profiles/unshare.json"
-		seccompProfile = core.SeccompProfile{
-			Type:             core.SeccompProfileTypeLocalhost,
-			LocalhostProfile: &unshare,
-		}
-	} else {
-		seccompProfile = core.SeccompProfile{
-			Type: core.SeccompProfileTypeRuntimeDefault,
-		}
-	}
-
 	// Get provider-specific conversion pod configuration
 	providerConfig, err := r.Builder.ConversionPodConfig(vm.Ref)
 	if err != nil {
@@ -2283,16 +2266,23 @@ func (r *KubeVirt) getVirtV2vPod(vm *plan.VMStatus, vmVolumes []cnv.Volume, vddk
 	}
 
 	psc := &core.PodSecurityContext{
-		RunAsNonRoot:   &nonRoot,
-		SeccompProfile: &seccompProfile,
+		RunAsNonRoot: &nonRoot,
 	}
 
-	// Only set user/group IDs when MTV controller runs on Kubernetes
-	// When MTV controller runs on OpenShift, SCCs will assign appropriate IDs automatically
-	if !Settings.OpenShift {
-		psc.FSGroup = ptr.To(qemuGroup)
-		psc.RunAsUser = ptr.To(qemuUser)
+	// Only set seccomp profile on OpenShift
+	// On Kubernetes, seccomp may be forbidden by restricted Pod Security Standards
+	if settings.Settings.OpenShift {
+		unshare := "profiles/unshare.json"
+		psc.SeccompProfile = &core.SeccompProfile{
+			Type:             core.SeccompProfileTypeLocalhost,
+			LocalhostProfile: &unshare,
+		}
 	}
+
+	// Don't set user/group IDs - let the cluster assign them automatically
+	// On OpenShift, SCCs will assign appropriate IDs automatically
+	// On Kubernetes with restricted policies, the cluster will assign IDs in the allowed range
+	// Setting specific IDs (like 107) can fail on clusters with restricted-v2 SCC-like policies
 
 	var podName string
 	var containerName string
